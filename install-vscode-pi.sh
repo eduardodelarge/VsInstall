@@ -1,91 +1,90 @@
 #!/usr/bin/env bash
 #
-# install-vscode-pi.sh
-# Installs Visual Studio Code on a Raspberry Pi from Microsoft's official
-# APT repository, so future updates arrive via `apt upgrade`.
+# install-vscode.sh — Instala o Visual Studio Code no Raspberry Pi
+# Testado em: Debian 13 (trixie) / Raspberry Pi OS, Raspberry Pi 4, arm64
 #
-# Supported: ARMv7 (armhf) and ARMv8 (arm64) — Pi 2 and newer.
-# Not supported: ARMv6 (Pi 1, Pi Zero / Zero W) — see note at the end.
+# Uso:
+#   ./install-vscode.sh              # instala
+#   ./install-vscode.sh --uninstall  # remove o VS Code e o repositório
 #
-# Usage:  chmod +x install-vscode-pi.sh && ./install-vscode-pi.sh
-#
-
 set -euo pipefail
 
-KEYRING="/usr/share/keyrings/microsoft-archive-keyring.gpg"
-SOURCE_LIST="/etc/apt/sources.list.d/vscode.list"
+KEYRING="/usr/share/keyrings/microsoft.gpg"
+SOURCES_LIST="/etc/apt/sources.list.d/vscode.list"
+REPO_URL="https://packages.microsoft.com/repos/code"
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+log()  { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
-# --- Sanity checks -----------------------------------------------------------
-
-[[ $EUID -eq 0 ]] && die "Don't run this as root. Run it as your normal user; it will call sudo when needed."
-
-command -v apt-get >/dev/null || die "This script needs a Debian-based OS (Raspberry Pi OS, Ubuntu, etc.)."
-
-if command -v code >/dev/null; then
-    warn "VS Code is already installed: $(code --version | head -n1)"
-    read -rp "Reinstall / repair anyway? [y/N] " reply
-    [[ ${reply,,} == y ]] || exit 0
+# --- Precisa de root (via sudo) -------------------------------------------
+if [[ $EUID -ne 0 ]]; then
+    command -v sudo >/dev/null || die "Rode como root ou instale o sudo."
+    log "Reexecutando com sudo..."
+    exec sudo -E bash "$0" "$@"
 fi
 
-# --- Detect architecture -----------------------------------------------------
+# --- Desinstalação --------------------------------------------------------
+if [[ "${1:-}" == "--uninstall" ]]; then
+    log "Removendo o VS Code..."
+    apt-get remove --purge -y code || true
+    rm -f "$SOURCES_LIST" "$KEYRING"
+    apt-get update -qq || true
+    log "VS Code e repositório removidos."
+    exit 0
+fi
 
+# --- Verificação de arquitetura -------------------------------------------
 ARCH="$(dpkg --print-architecture)"
-
 case "$ARCH" in
-    arm64|armhf|amd64)
-        log "Detected architecture: $ARCH"
-        ;;
-    armel)
-        die "ARMv6 (Pi 1 / Pi Zero) is not supported by VS Code. Try 'code-server' or a lighter editor such as Geany."
-        ;;
-    *)
-        die "Unsupported architecture: $ARCH"
-        ;;
+    arm64|armhf|amd64) log "Arquitetura detectada: $ARCH" ;;
+    *) die "Arquitetura '$ARCH' não é suportada pelo VS Code." ;;
 esac
 
-# --- Prerequisites -----------------------------------------------------------
+if [[ "$ARCH" == "armhf" ]]; then
+    warn "Sistema de 32 bits. Funciona, mas o build arm64 é bem mais rápido."
+fi
 
-log "Installing prerequisites..."
-sudo apt-get update -qq
-sudo apt-get install -y wget gpg apt-transport-https ca-certificates
+# --- Já está instalado? ---------------------------------------------------
+if command -v code >/dev/null 2>&1; then
+    warn "VS Code já instalado: $(code --version | head -n1)"
+    read -rp "Continuar mesmo assim (atualiza para a última versão)? [s/N] " r
+    [[ "${r,,}" == "s" ]] || exit 0
+fi
 
-# --- Add Microsoft's signing key --------------------------------------------
+# --- Dependências ---------------------------------------------------------
+log "Instalando dependências..."
+apt-get update -qq
+apt-get install -y wget gpg apt-transport-https ca-certificates
 
-log "Adding Microsoft signing key..."
-TMP_KEY="$(mktemp)"
-trap 'rm -f "$TMP_KEY"' EXIT
-
+# --- Chave GPG da Microsoft ----------------------------------------------
+log "Baixando e instalando a chave GPG da Microsoft..."
+tmpkey="$(mktemp)"
+trap 'rm -f "$tmpkey"' EXIT
 wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
-    | gpg --dearmor > "$TMP_KEY"
-sudo install -D -o root -g root -m 644 "$TMP_KEY" "$KEYRING"
+    | gpg --dearmor > "$tmpkey"
+install -D -o root -g root -m 644 "$tmpkey" "$KEYRING"
 
-# --- Add the repository ------------------------------------------------------
-
-log "Adding the VS Code repository..."
-echo "deb [arch=${ARCH} signed-by=${KEYRING}] https://packages.microsoft.com/repos/code stable main" \
-    | sudo tee "$SOURCE_LIST" > /dev/null
-
-# --- Install -----------------------------------------------------------------
-
-log "Installing VS Code (this may take a few minutes)..."
-sudo apt-get update -qq
-sudo apt-get install -y code
-
-# --- Done --------------------------------------------------------------------
-
-log "Done. Installed: $(code --version | head -n1)"
-cat <<'EOF'
-
-Launch it from the Programming menu, or run `code` in a terminal.
-Update it later with:  sudo apt update && sudo apt upgrade
-
-Tips for a smoother experience on a Pi:
-  * Disable telemetry and the built-in updater (Settings -> search "telemetry" / "update.mode": "none")
-  * If the UI feels sluggish on 4 GB or less, disable extensions you aren't using
-  * On a headless Pi, consider `code-server` or VS Code Remote-SSH from a desktop instead
-
+# --- Repositório ----------------------------------------------------------
+log "Configurando o repositório do VS Code..."
+cat > "$SOURCES_LIST" <<EOF
+deb [arch=amd64,arm64,armhf signed-by=$KEYRING] $REPO_URL stable main
 EOF
+chmod 644 "$SOURCES_LIST"
+
+# --- Instalação -----------------------------------------------------------
+log "Atualizando listas de pacotes..."
+apt-get update -qq
+
+log "Instalando o VS Code (pode demorar alguns minutos no Pi)..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y code
+
+# --- Verificação ----------------------------------------------------------
+if command -v code >/dev/null 2>&1; then
+    log "Instalado com sucesso: $(code --version | head -n1)"
+    echo
+    echo "Abra pelo menu (Programação > Visual Studio Code) ou rode: code"
+    echo "Atualizações futuras vêm junto com: sudo apt update && sudo apt upgrade"
+else
+    die "A instalação terminou, mas o comando 'code' não foi encontrado."
+fi
